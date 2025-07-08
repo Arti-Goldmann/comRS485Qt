@@ -16,10 +16,12 @@ set(PROJECT_SOURCES
         main.cpp
         mainwindow.cpp
         serialporthandler.cpp
+        modbusrtu.cpp
 
         mainwindow.h
-        mainwindow.ui
+        #mainwindow.ui
         serialporthandler.h
+        modbusrtu.h
 )
 
 if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)

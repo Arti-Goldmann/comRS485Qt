@@ -1,5 +1,6 @@
 #include "mainwindow.h"
 #include "serialporthandler.h"
+#include "modbusrtu.h"
 #include <QApplication>
 #include <QDateTime>
 
@@ -17,6 +18,8 @@ MainWindow::MainWindow(QWidget *parent)
     m_serialHandler = new SerialPortHandler(this);
     connect(m_serialHandler, &SerialPortHandler::dataReceived, this, &MainWindow::onDataReceived);
     connect(m_serialHandler, &SerialPortHandler::errorOccurred, this, &MainWindow::onPortError);
+    
+    m_modbusRTU = new ModbusRTU(this);
     
     setWindowTitle("RS485 Qt Terminal");
     resize(800, 600);
@@ -85,7 +88,10 @@ void MainWindow::setupUI()
     
     m_mainLayout->addWidget(m_connectionGroup);
     
-    m_dataGroup = new QGroupBox("Отправка данных", this);
+    m_dataTabWidget = new QTabWidget(this);
+    
+    m_rawDataTab = new QWidget();
+    m_dataGroup = new QGroupBox("Отправка данных", m_rawDataTab);
     m_dataLayout = new QVBoxLayout(m_dataGroup);
     
     m_sendLayout = new QHBoxLayout();
@@ -102,7 +108,75 @@ void MainWindow::setupUI()
     m_hexModeCheck = new QCheckBox("HEX режим");
     m_dataLayout->addWidget(m_hexModeCheck);
     
-    m_mainLayout->addWidget(m_dataGroup);
+    QVBoxLayout *rawTabLayout = new QVBoxLayout(m_rawDataTab);
+    rawTabLayout->addWidget(m_dataGroup);
+    rawTabLayout->addStretch();
+    
+    m_dataTabWidget->addTab(m_rawDataTab, "Сырые данные");
+    
+    m_modbusTab = new QWidget();
+    m_modbusGroup = new QGroupBox("Modbus RTU", m_modbusTab);
+    m_modbusLayout = new QVBoxLayout(m_modbusGroup);
+    
+    m_modbusFormLayout = new QGridLayout();
+    
+    m_modbusFormLayout->addWidget(new QLabel("Адрес устройства:"), 0, 0);
+    m_slaveAddressSpinBox = new QSpinBox();
+    m_slaveAddressSpinBox->setRange(1, 247);
+    m_slaveAddressSpinBox->setValue(1);
+    m_modbusFormLayout->addWidget(m_slaveAddressSpinBox, 0, 1);
+    
+    m_modbusFormLayout->addWidget(new QLabel("Функция:"), 1, 0);
+    m_functionCodeCombo = new QComboBox();
+    m_functionCodeCombo->addItem("01 - Чтение катушек", 0x01);
+    m_functionCodeCombo->addItem("02 - Чтение дискретных входов", 0x02);
+    m_functionCodeCombo->addItem("03 - Чтение регистров хранения", 0x03);
+    m_functionCodeCombo->addItem("04 - Чтение входных регистров", 0x04);
+    m_functionCodeCombo->addItem("05 - Запись одной катушки", 0x05);
+    m_functionCodeCombo->addItem("06 - Запись одного регистра", 0x06);
+    m_functionCodeCombo->addItem("0F - Запись нескольких катушек", 0x0F);
+    m_functionCodeCombo->addItem("10 - Запись нескольких регистров", 0x10);
+    m_functionCodeCombo->setCurrentIndex(2);
+    m_modbusFormLayout->addWidget(m_functionCodeCombo, 1, 1);
+    
+    m_modbusFormLayout->addWidget(new QLabel("Начальный адрес:"), 2, 0);
+    m_startAddressSpinBox = new QSpinBox();
+    m_startAddressSpinBox->setRange(0, 65535);
+    m_startAddressSpinBox->setValue(0);
+    m_modbusFormLayout->addWidget(m_startAddressSpinBox, 2, 1);
+    
+    m_quantityLabel = new QLabel("Количество/Значение:");
+    m_modbusFormLayout->addWidget(m_quantityLabel, 3, 0);
+    m_quantitySpinBox = new QSpinBox();
+    m_quantitySpinBox->setRange(1, 125);
+    m_quantitySpinBox->setValue(1);
+    m_modbusFormLayout->addWidget(m_quantitySpinBox, 3, 1);
+    
+    m_valueSpinBox = new QSpinBox();
+    m_valueSpinBox->setRange(0, 65535);
+    m_valueSpinBox->setValue(0);
+    m_valueSpinBox->setVisible(false);
+    m_modbusFormLayout->addWidget(m_valueSpinBox, 3, 2);
+    
+    m_modbusFormLayout->addWidget(new QLabel("Данные (HEX):"), 4, 0);
+    m_dataEdit = new QLineEdit();
+    m_dataEdit->setPlaceholderText("Например: 01 02 03 04");
+    m_dataEdit->setVisible(false);
+    m_modbusFormLayout->addWidget(m_dataEdit, 4, 1, 1, 2);
+    
+    m_modbusLayout->addLayout(m_modbusFormLayout);
+    
+    m_sendModbusBtn = new QPushButton("Отправить Modbus запрос");
+    m_sendModbusBtn->setEnabled(false);
+    m_modbusLayout->addWidget(m_sendModbusBtn);
+    
+    QVBoxLayout *modbusTabLayout = new QVBoxLayout(m_modbusTab);
+    modbusTabLayout->addWidget(m_modbusGroup);
+    modbusTabLayout->addStretch();
+    
+    m_dataTabWidget->addTab(m_modbusTab, "Modbus RTU");
+    
+    m_mainLayout->addWidget(m_dataTabWidget);
     
     m_logGroup = new QGroupBox("Лог данных", this);
     m_logLayout = new QVBoxLayout(m_logGroup);
@@ -134,6 +208,23 @@ void MainWindow::setupConnections()
     connect(m_sendBtn, &QPushButton::clicked, this, &MainWindow::sendData);
     connect(m_clearBtn, &QPushButton::clicked, this, &MainWindow::clearData);
     connect(m_sendEdit, &QLineEdit::returnPressed, this, &MainWindow::sendData);
+    connect(m_sendModbusBtn, &QPushButton::clicked, this, &MainWindow::sendModbusRequest);
+    
+    connect(m_functionCodeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), [this](int index) {
+        int funcCode = m_functionCodeCombo->currentData().toInt();
+        bool isWrite = (funcCode == 0x05 || funcCode == 0x06);
+        bool isMultipleWrite = (funcCode == 0x0F || funcCode == 0x10);
+        
+        m_quantitySpinBox->setVisible(!isWrite);
+        m_valueSpinBox->setVisible(isWrite);
+        m_dataEdit->setVisible(isMultipleWrite);
+        
+        if (isWrite) {
+            m_quantityLabel->setText("Значение:");
+        } else {
+            m_quantityLabel->setText("Количество:");
+        }
+    });
 }
 
 void MainWindow::refreshPorts()
@@ -266,11 +357,30 @@ void MainWindow::clearData()
 
 void MainWindow::onDataReceived(const QByteArray &data)
 {
-    m_logText->append(QString("[%1] RX: %2")
-                      .arg(QDateTime::currentDateTime().toString("hh:mm:ss"))
-                      .arg(m_hexModeCheck->isChecked() ? 
-                           data.toHex(' ').toUpper() : 
-                           QString::fromUtf8(data)));
+    QString hexData = data.toHex(' ').toUpper();
+    QString logEntry;
+    
+    // Проверяем, является ли это Modbus ответом
+    bool isModbusResponse = (data.length() >= 4 && ModbusRTU::validateResponse(data));
+    
+    if (isModbusResponse) {
+        // Для Modbus всегда показываем HEX
+        logEntry = QString("[%1] RX (Modbus): %2")
+                  .arg(QDateTime::currentDateTime().toString("hh:mm:ss"))
+                  .arg(hexData);
+        
+        QString modbusInfo = ModbusRTU::parseResponse(data);
+        logEntry += QString(" | %1").arg(modbusInfo);
+    } else {
+        // Для обычных данных используем настройку HEX режима
+        logEntry = QString("[%1] RX: %2")
+                  .arg(QDateTime::currentDateTime().toString("hh:mm:ss"))
+                  .arg(m_hexModeCheck->isChecked() ? 
+                       hexData : 
+                       QString::fromUtf8(data));
+    }
+    
+    m_logText->append(logEntry);
     
     if (m_autoScrollCheck->isChecked()) {
         m_logText->moveCursor(QTextCursor::End);
@@ -297,10 +407,88 @@ void MainWindow::updateConnectionStatus(bool connected)
     m_disconnectBtn->setEnabled(connected);
     m_sendBtn->setEnabled(connected);
     m_sendEdit->setEnabled(connected);
+    m_sendModbusBtn->setEnabled(connected);
     
     QList<QWidget*> settingsWidgets = {m_portCombo, m_baudRateCombo, m_dataBitsCombo, 
                                        m_parityCombo, m_stopBitsCombo, m_flowControlCombo};
     for (QWidget* widget : settingsWidgets) {
         widget->setEnabled(!connected);
+    }
+}
+
+void MainWindow::sendModbusRequest()
+{
+    if (!m_serialHandler || !m_serialHandler->isOpen()) {
+        QMessageBox::warning(this, "Ошибка", "Порт не подключен");
+        return;
+    }
+    
+    uint8_t slaveAddress = m_slaveAddressSpinBox->value();
+    int funcCode = m_functionCodeCombo->currentData().toInt();
+    uint16_t startAddress = m_startAddressSpinBox->value();
+    uint16_t quantity = m_quantitySpinBox->value();
+    uint16_t value = m_valueSpinBox->value();
+    QString dataString = m_dataEdit->text();
+    
+    QByteArray packet;
+    
+    switch (funcCode) {
+        case 0x01:
+        case 0x02:
+        case 0x03:
+        case 0x04: {
+            ModbusRTU::ReadRequest request;
+            request.slaveAddress = slaveAddress;
+            request.functionCode = static_cast<ModbusRTU::FunctionCode>(funcCode);
+            request.startAddress = startAddress;
+            request.quantity = quantity;
+            packet = ModbusRTU::createReadRequest(request);
+            break;
+        }
+        case 0x05:
+        case 0x06: {
+            ModbusRTU::WriteSingleRequest request;
+            request.slaveAddress = slaveAddress;
+            request.functionCode = static_cast<ModbusRTU::FunctionCode>(funcCode);
+            request.address = startAddress;
+            request.value = value;
+            packet = ModbusRTU::createWriteSingleRequest(request);
+            break;
+        }
+        case 0x0F:
+        case 0x10: {
+            ModbusRTU::WriteMultipleRequest request;
+            request.slaveAddress = slaveAddress;
+            request.functionCode = static_cast<ModbusRTU::FunctionCode>(funcCode);
+            request.startAddress = startAddress;
+            request.quantity = quantity;
+            
+            QStringList hexBytes = dataString.split(' ', Qt::SkipEmptyParts);
+            for (const QString &hexByte : hexBytes) {
+                bool ok;
+                uint8_t byte = hexByte.toUInt(&ok, 16);
+                if (!ok) {
+                    QMessageBox::warning(this, "Ошибка", "Некорректный формат данных");
+                    return;
+                }
+                request.data.append(byte);
+            }
+            
+            packet = ModbusRTU::createWriteMultipleRequest(request);
+            break;
+        }
+        default:
+            QMessageBox::warning(this, "Ошибка", "Неподдерживаемый код функции");
+            return;
+    }
+    
+    if (m_serialHandler->write(packet)) {
+        m_logText->append(QString("[%1] TX (Modbus): %2")
+                          .arg(QDateTime::currentDateTime().toString("hh:mm:ss"))
+                          .arg(packet.toHex(' ').toUpper()));
+        
+        if (m_autoScrollCheck->isChecked()) {
+            m_logText->moveCursor(QTextCursor::End);
+        }
     }
 }
