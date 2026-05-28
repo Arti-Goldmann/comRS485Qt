@@ -357,6 +357,11 @@ void MainWindow::clearData()
 
 void MainWindow::onDataReceived(const QByteArray &data)
 {
+    // Пропускаем пустые данные
+    if (data.isEmpty()) {
+        return;
+    }
+    
     QString hexData = data.toHex(' ').toUpper();
     QString logEntry;
     
@@ -372,12 +377,37 @@ void MainWindow::onDataReceived(const QByteArray &data)
         QString modbusInfo = ModbusRTU::parseResponse(data);
         logEntry += QString(" | %1").arg(modbusInfo);
     } else {
-        // Для обычных данных используем настройку HEX режима
-        logEntry = QString("[%1] RX: %2")
-                  .arg(QDateTime::currentDateTime().toString("hh:mm:ss"))
-                  .arg(m_hexModeCheck->isChecked() ? 
-                       hexData : 
-                       QString::fromUtf8(data));
+        // Для обычных данных
+        if (m_hexModeCheck->isChecked()) {
+            logEntry = QString("[%1] RX: %2")
+                      .arg(QDateTime::currentDateTime().toString("hh:mm:ss"))
+                      .arg(hexData);
+        } else {
+            // Проверяем, содержит ли данные только печатаемые символы
+            bool hasPrintableChars = false;
+            bool hasNonPrintableChars = false;
+            
+            for (int i = 0; i < data.length(); ++i) {
+                unsigned char byte = static_cast<unsigned char>(data[i]);
+                if (byte >= 32 && byte <= 126) {
+                    hasPrintableChars = true;
+                } else if (byte != 0x0A && byte != 0x0D && byte != 0x09) { // исключаем \n, \r, \t
+                    hasNonPrintableChars = true;
+                }
+            }
+            
+            if (hasNonPrintableChars || !hasPrintableChars) {
+                // Показываем в HEX если есть непечатаемые символы
+                logEntry = QString("[%1] RX (HEX): %2")
+                          .arg(QDateTime::currentDateTime().toString("hh:mm:ss"))
+                          .arg(hexData);
+            } else {
+                // Показываем как текст только если все символы печатаемые
+                logEntry = QString("[%1] RX: %2")
+                          .arg(QDateTime::currentDateTime().toString("hh:mm:ss"))
+                          .arg(QString::fromUtf8(data));
+            }
+        }
     }
     
     m_logText->append(logEntry);

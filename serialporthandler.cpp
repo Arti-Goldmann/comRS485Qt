@@ -5,10 +5,20 @@ SerialPortHandler::SerialPortHandler(QObject *parent)
     : QObject(parent)
     , m_serialPort(new QSerialPort(this))
     , m_isConnected(false)
+    , m_readTimer(new QTimer(this))
 {
     connect(m_serialPort, &QSerialPort::readyRead, this, &SerialPortHandler::handleReadyRead);
     connect(m_serialPort, QOverload<QSerialPort::SerialPortError>::of(&QSerialPort::errorOccurred),
             this, &SerialPortHandler::handleError);
+    
+    m_readTimer->setSingleShot(true);
+    m_readTimer->setInterval(50); // 50ms таймаут для сбора данных
+    connect(m_readTimer, &QTimer::timeout, [this]() {
+        if (!m_readBuffer.isEmpty()) {
+            emit dataReceived(m_readBuffer);
+            m_readBuffer.clear();
+        }
+    });
 }
 
 SerialPortHandler::~SerialPortHandler()
@@ -49,6 +59,13 @@ bool SerialPortHandler::open(const Settings &settings)
 void SerialPortHandler::close()
 {
     if (m_serialPort && m_serialPort->isOpen()) {
+        // Отправляем оставшиеся данные из буфера
+        if (!m_readBuffer.isEmpty()) {
+            emit dataReceived(m_readBuffer);
+            m_readBuffer.clear();
+        }
+        m_readTimer->stop();
+        
         m_serialPort->close();
         m_isConnected = false;
         emit connectionStatusChanged(false);
@@ -110,11 +127,8 @@ void SerialPortHandler::handleReadyRead()
     if (!data.isEmpty()) {
         m_readBuffer.append(data);
         
-        while (!m_readBuffer.isEmpty()) {
-            emit dataReceived(m_readBuffer);
-            m_readBuffer.clear();
-            break;
-        }
+        // Перезапускаем таймер для сбора данных
+        m_readTimer->start();
     }
 }
 

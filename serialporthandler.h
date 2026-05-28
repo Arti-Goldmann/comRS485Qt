@@ -47,6 +47,7 @@ private:
     QByteArray m_readBuffer;
     Settings m_currentSettings;
     bool m_isConnected;
+    QTimer *m_readTimer;
 };
 
 #endif // SERIALPORTHANDLER_H
