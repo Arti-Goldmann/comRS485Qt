@@ -9,20 +9,33 @@ set(CMAKE_AUTORCC ON)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets SerialPort)
-find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets SerialPort)
+find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets SerialPort Network)
+find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets SerialPort Network)
 
 set(PROJECT_SOURCES
         main.cpp
         mainwindow.cpp
         serialporthandler.cpp
+        tcpclienthandler.cpp
         modbusrtu.cpp
+        modbustcp.cpp
+        networkconfigurator.cpp
 
         mainwindow.h
         #mainwindow.ui
         serialporthandler.h
+        tcpclienthandler.h
         modbusrtu.h
+        modbustcp.h
+        networkconfigurator.h
+
+        scripts.qrc
 )
+
+# Иконка исполняемого файла Windows (компилируется windres/RC и встраивается в .exe)
+if(WIN32)
+    list(APPEND PROJECT_SOURCES app_icon.rc)
+endif()
 
 if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)
     qt_add_executable(comRS485Qt
@@ -47,7 +60,7 @@ else()
     endif()
 endif()
 
-target_link_libraries(comRS485Qt PRIVATE Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::SerialPort)
+target_link_libraries(comRS485Qt PRIVATE Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::SerialPort Qt${QT_VERSION_MAJOR}::Network)
 
 # Qt for iOS sets MACOSX_BUNDLE_GUI_IDENTIFIER automatically since Qt 6.1.
 # If you are developing for iOS or macOS you should consider setting an
@@ -72,4 +85,24 @@ install(TARGETS comRS485Qt
 
 if(QT_VERSION_MAJOR EQUAL 6)
     qt_finalize_executable(comRS485Qt)
+endif()
+
+# --- Развёртывание в папку Release на каждой сборке (Windows) ---
+if(WIN32)
+    # Находим windeployqt рядом с qmake активного комплекта Qt
+    get_target_property(_qmake_exe Qt${QT_VERSION_MAJOR}::qmake IMPORTED_LOCATION)
+    get_filename_component(_qt_bin_dir "${_qmake_exe}" DIRECTORY)
+
+    # Цель без выходного файла всегда считается устаревшей, поэтому Build/Run
+    # в Qt Creator обновляет Release даже если исходники не менялись. Передаём
+    # реальный путь к собранному exe и каталог bin Qt — скрипт не зависит от комплекта.
+    add_custom_target(deploy_release ALL
+        COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/deploy.bat
+                "$<TARGET_FILE:comRS485Qt>"
+                "${_qt_bin_dir}"
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "Deploying comRS485Qt to Release folder..."
+        VERBATIM
+    )
+    add_dependencies(deploy_release comRS485Qt)
 endif()

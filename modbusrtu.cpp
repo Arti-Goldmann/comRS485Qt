@@ -1,5 +1,7 @@
 #include "modbusrtu.h"
 #include <QDebug>
+#include <QVector>
+#include <algorithm>
 
 ModbusRTU::ModbusRTU(QObject *parent) : QObject(parent)
 {
@@ -143,6 +145,187 @@ QString ModbusRTU::parseResponse(const QByteArray &response)
     }
     
     return result;
+}
+
+int ModbusRTU::detectFrameLength(const QByteArray &buffer, int offset)
+{
+    int n = buffer.length();
+    // Минимальный кадр Modbus RTU: адрес + функция + 2 байта CRC
+    if (offset + 4 > n) {
+        return 0;
+    }
+
+    uint8_t functionCode = static_cast<uint8_t>(buffer[offset + 1]);
+    uint8_t baseFunction = functionCode & 0x7F;
+
+    // Возможные длины кадра для данного кода функции.
+    // Перебираем их по возрастанию и принимаем первую, у которой сходится CRC.
+    QVector<int> candidates;
+
+    if (functionCode & 0x80) {
+        // Ответ-исключение: адрес + функция + код ошибки + CRC
+        candidates.append(5);
+    }
+
+    switch (baseFunction) {
+        case ReadCoils:
+        case ReadDiscreteInputs:
+        case ReadHoldingRegisters:
+        case ReadInputRegisters:
+            candidates.append(8); // запрос
+            if (offset + 2 < n) {
+                candidates.append(5 + static_cast<uint8_t>(buffer[offset + 2])); // ответ
+            }
+            break;
+        case WriteSingleCoil:
+        case WriteSingleRegister:
+            candidates.append(8); // запрос и ответ (эхо) одинаковой длины
+            break;
+        case WriteMultipleCoils:
+        case WriteMultipleRegisters:
+            candidates.append(8); // ответ
+            if (offset + 6 < n) {
+                candidates.append(9 + static_cast<uint8_t>(buffer[offset + 6])); // запрос
+            }
+            break;
+        default:
+            break;
+    }
+
+    std::sort(candidates.begin(), candidates.end());
+
+    int previous = -1;
+    for (int length : candidates) {
+        if (length == previous) {
+            continue;
+        }
+        previous = length;
+
+        if (length < 4 || offset + length > n) {
+            continue;
+        }
+        if (validateResponse(buffer.mid(offset, length))) {
+            return length;
+        }
+    }
+
+    return 0;
+}
+
+QList<QByteArray> ModbusRTU::splitFrames(const QByteArray &buffer, QByteArray &unrecognized)
+{
+    QList<QByteArray> frames;
+    unrecognized.clear();
+
+    int i = 0;
+    int n = buffer.length();
+    while (i < n) {
+        int length = detectFrameLength(buffer, i);
+        if (length > 0) {
+            frames.append(buffer.mid(i, length));
+            i += length;
+        } else {
+            // Байт не является началом корректного кадра — пропускаем его
+            // (ресинхронизация) и пробуем со следующего.
+            unrecognized.append(buffer[i]);
+            ++i;
+        }
+    }
+
+    return frames;
+}
+
+QString ModbusRTU::parseFrame(const QByteArray &frame)
+{
+    if (frame.length() < 4) {
+        return QString("Неверная длина кадра (%1 байт)").arg(frame.length());
+    }
+    if (!validateResponse(frame)) {
+        return QString("Ошибка CRC");
+    }
+
+    uint8_t slaveAddress = static_cast<uint8_t>(frame[0]);
+    uint8_t functionCode = static_cast<uint8_t>(frame[1]);
+    int length = frame.length();
+
+    QString head = QString("Адрес: %1, Функция: %2 (%3)")
+                   .arg(slaveAddress)
+                   .arg(functionCode, 2, 16, QChar('0'))
+                   .arg(functionCodeToString(static_cast<FunctionCode>(functionCode & 0x7F)));
+
+    if (functionCode & 0x80) {
+        uint8_t exceptionCode = static_cast<uint8_t>(frame[2]);
+        return QString("[Ответ-ошибка] %1, Исключение: %2 (%3)")
+               .arg(head)
+               .arg(exceptionCode, 2, 16, QChar('0'))
+               .arg(exceptionCodeToString(exceptionCode));
+    }
+
+    switch (functionCode) {
+        case ReadCoils:
+        case ReadDiscreteInputs:
+        case ReadHoldingRegisters:
+        case ReadInputRegisters: {
+            if (length == 8) {
+                // Запрос: начальный адрес + количество
+                uint16_t startAddress = bytesToUint16(frame, 2);
+                uint16_t quantity = bytesToUint16(frame, 4);
+                return QString("[Запрос] %1, Начальный адрес: %2, Количество: %3")
+                       .arg(head).arg(startAddress).arg(quantity);
+            } else {
+                // Ответ: счётчик байт + данные
+                uint8_t byteCount = static_cast<uint8_t>(frame[2]);
+                QByteArray payload = frame.mid(3, byteCount);
+                return QString("[Ответ] %1, Байт данных: %2, Данные: %3")
+                       .arg(head).arg(byteCount).arg(QString(payload.toHex(' ').toUpper()));
+            }
+        }
+        case WriteSingleCoil:
+        case WriteSingleRegister: {
+            // Запрос и ответ идентичны (эхо)
+            uint16_t address = bytesToUint16(frame, 2);
+            uint16_t value = bytesToUint16(frame, 4);
+            return QString("[Запрос/Ответ] %1, Адрес: %2, Значение: %3")
+                   .arg(head).arg(address).arg(value);
+        }
+        case WriteMultipleCoils:
+        case WriteMultipleRegisters: {
+            if (length == 8) {
+                // Ответ: начальный адрес + количество
+                uint16_t startAddress = bytesToUint16(frame, 2);
+                uint16_t quantity = bytesToUint16(frame, 4);
+                return QString("[Ответ] %1, Начальный адрес: %2, Количество: %3")
+                       .arg(head).arg(startAddress).arg(quantity);
+            } else {
+                // Запрос: начальный адрес + количество + счётчик байт + данные
+                uint16_t startAddress = bytesToUint16(frame, 2);
+                uint16_t quantity = bytesToUint16(frame, 4);
+                uint8_t byteCount = static_cast<uint8_t>(frame[6]);
+                QByteArray payload = frame.mid(7, byteCount);
+                return QString("[Запрос] %1, Начальный адрес: %2, Количество: %3, Данные: %4")
+                       .arg(head).arg(startAddress).arg(quantity)
+                       .arg(QString(payload.toHex(' ').toUpper()));
+            }
+        }
+        default:
+            return head;
+    }
+}
+
+QString ModbusRTU::exceptionCodeToString(uint8_t code)
+{
+    switch (code) {
+        case 0x01: return "Недопустимая функция";
+        case 0x02: return "Недопустимый адрес данных";
+        case 0x03: return "Недопустимое значение данных";
+        case 0x04: return "Ошибка устройства";
+        case 0x05: return "Подтверждение (требуется время)";
+        case 0x06: return "Устройство занято";
+        case 0x08: return "Ошибка чётности памяти";
+        case 0x0A: return "Шлюз: нет пути";
+        case 0x0B: return "Шлюз: устройство не ответило";
+        default:   return "Неизвестная ошибка";
+    }
 }
 
 QString ModbusRTU::functionCodeToString(FunctionCode code)

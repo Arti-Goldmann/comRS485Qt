@@ -1,0 +1,9 @@
+<RCC>
+    <qresource prefix="/scripts">
+        <file alias="configure-adapter.ps1">scripts/configure-adapter.ps1</file>
+        <file alias="restore-adapter.ps1">scripts/restore-adapter.ps1</file>
+    </qresource>
+    <qresource prefix="/">
+        <file>icon.png</file>
+    </qresource>
+</RCC>
