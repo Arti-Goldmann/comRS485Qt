@@ -27,7 +27,8 @@ public:
         WriteSingleCoil = 0x05,
         WriteSingleRegister = 0x06,
         WriteMultipleCoils = 0x0F,
-        WriteMultipleRegisters = 0x10
+        WriteMultipleRegisters = 0x10,
+        ReadWriteMultipleRegisters = 0x17
     };
 
     struct ReadRequest {
@@ -52,6 +53,17 @@ public:
         QByteArray data;
     };
 
+    // Функция 0x17: в одной транзакции сначала выполняется запись регистров,
+    // затем чтение (у чтения и записи независимые адреса и количества).
+    struct ReadWriteMultipleRequest {
+        uint8_t unitId;
+        uint16_t readStartAddress;
+        uint16_t readQuantity;
+        uint16_t writeStartAddress;
+        uint16_t writeQuantity;
+        QByteArray data;
+    };
+
     explicit ModbusTCP(QObject *parent = nullptr);
 
     // transactionId — идентификатор транзакции, который устройство вернёт в ответе.
@@ -59,6 +71,7 @@ public:
     static QByteArray createReadRequest(const ReadRequest &request, uint16_t transactionId);
     static QByteArray createWriteSingleRequest(const WriteSingleRequest &request, uint16_t transactionId);
     static QByteArray createWriteMultipleRequest(const WriteMultipleRequest &request, uint16_t transactionId);
+    static QByteArray createReadWriteMultipleRequest(const ReadWriteMultipleRequest &request, uint16_t transactionId);
 
     // Проверяет согласованность MBAP-заголовка: ProtocolId == 0 и поле Length
     // соответствует фактической длине кадра.
@@ -79,6 +92,10 @@ public:
 private:
     // Собирает полный кадр: MBAP-заголовок + готовый PDU.
     static QByteArray buildFrame(uint16_t transactionId, uint8_t unitId, const QByteArray &pdu);
+
+    // Отличает запрос функции 0x17 от ответа: у них разный состав PDU,
+    // а код функции одинаковый.
+    static bool isReadWriteRequestFrame(const QByteArray &frame);
 
     // Определяет длину корректного кадра Modbus TCP, начинающегося с offset.
     // Возвращает 0, если в этой позиции нет валидного начала кадра, и -1,

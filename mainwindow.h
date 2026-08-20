@@ -56,6 +56,8 @@ private:
     void setupUI();
     void setupConnections();
     void updateConnectionStatus(bool connected);
+    // Показывает поля формы Modbus, нужные выбранному коду функции.
+    void updateModbusFormFields();
     void appendRawData(const QByteArray &data, const QString &timestamp);
 
     // Текущий выбранный транспорт (по состоянию радиокнопок).
@@ -121,9 +123,16 @@ private:
     QSpinBox *m_startAddressSpinBox;
     QSpinBox *m_quantitySpinBox;
     QSpinBox *m_valueSpinBox;
+    // Поля адреса и количества для части записи функции 0x17
+    QSpinBox *m_writeAddressSpinBox;
+    QSpinBox *m_writeQuantitySpinBox;
     QLineEdit *m_dataEdit;
     QPushButton *m_sendModbusBtn;
+    QLabel *m_startAddressLabel;
     QLabel *m_quantityLabel;
+    QLabel *m_writeAddressLabel;
+    QLabel *m_writeQuantityLabel;
+    QLabel *m_dataLabel;
     
     QGroupBox *m_logGroup;
     QVBoxLayout *m_logLayout;

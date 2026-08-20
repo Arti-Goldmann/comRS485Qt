@@ -65,6 +65,42 @@ QByteArray ModbusRTU::createWriteMultipleRequest(const WriteMultipleRequest &req
     return packet;
 }
 
+QByteArray ModbusRTU::createReadWriteMultipleRequest(const ReadWriteMultipleRequest &request)
+{
+    QByteArray packet;
+
+    packet.append(static_cast<char>(request.slaveAddress));
+    packet.append(static_cast<char>(ReadWriteMultipleRegisters));
+    packet.append(uint16ToBytes(request.readStartAddress));
+    packet.append(uint16ToBytes(request.readQuantity));
+    packet.append(uint16ToBytes(request.writeStartAddress));
+    packet.append(uint16ToBytes(request.writeQuantity));
+
+    uint8_t byteCount = request.writeQuantity * 2;
+    packet.append(static_cast<char>(byteCount));
+    packet.append(request.data.left(byteCount));
+
+    uint16_t crc = calculateCRC(packet);
+    packet.append(static_cast<char>(crc & 0xFF));
+    packet.append(static_cast<char>((crc >> 8) & 0xFF));
+
+    return packet;
+}
+
+bool ModbusRTU::isReadWriteRequestFrame(const QByteArray &frame)
+{
+    // Запрос 0x17: адрес + функция + 4 поля по 2 байта + счётчик байт + данные + CRC.
+    // Ответ содержит только счётчик байт и данные, поэтому длина кадра вместе с
+    // согласованностью «счётчик байт == 2 * количество регистров записи»
+    // надёжно отличает запрос от ответа.
+    if (frame.length() < 13) {
+        return false;
+    }
+    uint8_t byteCount = static_cast<uint8_t>(frame[10]);
+    return byteCount == 2 * bytesToUint16(frame, 8) &&
+           frame.length() == 13 + byteCount;
+}
+
 bool ModbusRTU::validateResponse(const QByteArray &response)
 {
     if (response.length() < 4) {
@@ -112,7 +148,8 @@ QString ModbusRTU::parseResponse(const QByteArray &response)
             case ReadCoils:
             case ReadDiscreteInputs:
             case ReadHoldingRegisters:
-            case ReadInputRegisters: {
+            case ReadInputRegisters:
+            case ReadWriteMultipleRegisters: {
                 if (response.length() > 3) {
                     uint8_t byteCount = static_cast<uint8_t>(response[2]);
                     result += QString(", Байт данных: %1").arg(byteCount);
@@ -186,6 +223,14 @@ int ModbusRTU::detectFrameLength(const QByteArray &buffer, int offset)
             candidates.append(8); // ответ
             if (offset + 6 < n) {
                 candidates.append(9 + static_cast<uint8_t>(buffer[offset + 6])); // запрос
+            }
+            break;
+        case ReadWriteMultipleRegisters:
+            if (offset + 2 < n) {
+                candidates.append(5 + static_cast<uint8_t>(buffer[offset + 2])); // ответ
+            }
+            if (offset + 10 < n) {
+                candidates.append(13 + static_cast<uint8_t>(buffer[offset + 10])); // запрос
             }
             break;
         default:
@@ -307,6 +352,29 @@ QString ModbusRTU::parseFrame(const QByteArray &frame)
                        .arg(QString(payload.toHex(' ').toUpper()));
             }
         }
+        case ReadWriteMultipleRegisters: {
+            if (isReadWriteRequestFrame(frame)) {
+                // Запрос: адрес и количество для чтения, затем то же для записи,
+                // счётчик байт и записываемые данные
+                uint16_t readAddress = bytesToUint16(frame, 2);
+                uint16_t readQuantity = bytesToUint16(frame, 4);
+                uint16_t writeAddress = bytesToUint16(frame, 6);
+                uint16_t writeQuantity = bytesToUint16(frame, 8);
+                uint8_t byteCount = static_cast<uint8_t>(frame[10]);
+                QByteArray payload = frame.mid(11, byteCount);
+                return QString("[Запрос] %1, Адрес чтения: %2, Количество чтения: %3, "
+                               "Адрес записи: %4, Количество записи: %5, Данные записи: %6")
+                       .arg(head).arg(readAddress).arg(readQuantity)
+                       .arg(writeAddress).arg(writeQuantity)
+                       .arg(QString(payload.toHex(' ').toUpper()));
+            } else {
+                // Ответ: счётчик байт + прочитанные данные
+                uint8_t byteCount = static_cast<uint8_t>(frame[2]);
+                QByteArray payload = frame.mid(3, byteCount);
+                return QString("[Ответ] %1, Байт данных: %2, Данные: %3")
+                       .arg(head).arg(byteCount).arg(QString(payload.toHex(' ').toUpper()));
+            }
+        }
         default:
             return head;
     }
@@ -339,6 +407,7 @@ QString ModbusRTU::functionCodeToString(FunctionCode code)
         case WriteSingleRegister: return "Запись одного регистра";
         case WriteMultipleCoils: return "Запись нескольких катушек";
         case WriteMultipleRegisters: return "Запись нескольких регистров";
+        case ReadWriteMultipleRegisters: return "Чтение/запись нескольких регистров";
         default: return "Неизвестная функция";
     }
 }

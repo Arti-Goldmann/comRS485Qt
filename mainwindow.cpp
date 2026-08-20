@@ -279,34 +279,51 @@ void MainWindow::setupUI()
     m_functionCodeCombo->addItem("06 - Запись одного регистра", 0x06);
     m_functionCodeCombo->addItem("0F - Запись нескольких катушек", 0x0F);
     m_functionCodeCombo->addItem("10 - Запись нескольких регистров", 0x10);
+    m_functionCodeCombo->addItem("17 - Чтение/запись нескольких регистров", 0x17);
     m_functionCodeCombo->setCurrentIndex(2);
     m_modbusFormLayout->addWidget(m_functionCodeCombo, 1, 1);
-    
-    m_modbusFormLayout->addWidget(new QLabel("Начальный адрес:"), 2, 0);
+
+    m_startAddressLabel = new QLabel("Начальный адрес:");
+    m_modbusFormLayout->addWidget(m_startAddressLabel, 2, 0);
     m_startAddressSpinBox = new QSpinBox();
     m_startAddressSpinBox->setRange(0, 65535);
     m_startAddressSpinBox->setValue(0);
     m_modbusFormLayout->addWidget(m_startAddressSpinBox, 2, 1);
-    
+
     m_quantityLabel = new QLabel("Количество/Значение:");
     m_modbusFormLayout->addWidget(m_quantityLabel, 3, 0);
     m_quantitySpinBox = new QSpinBox();
     m_quantitySpinBox->setRange(1, 125);
     m_quantitySpinBox->setValue(1);
     m_modbusFormLayout->addWidget(m_quantitySpinBox, 3, 1);
-    
+
     m_valueSpinBox = new QSpinBox();
     m_valueSpinBox->setRange(0, 65535);
     m_valueSpinBox->setValue(0);
     m_valueSpinBox->setVisible(false);
     m_modbusFormLayout->addWidget(m_valueSpinBox, 3, 2);
-    
-    m_modbusFormLayout->addWidget(new QLabel("Данные (HEX):"), 4, 0);
+
+    // Отдельные адрес и количество для части записи функции 0x17
+    m_writeAddressLabel = new QLabel("Адрес записи:");
+    m_modbusFormLayout->addWidget(m_writeAddressLabel, 4, 0);
+    m_writeAddressSpinBox = new QSpinBox();
+    m_writeAddressSpinBox->setRange(0, 65535);
+    m_writeAddressSpinBox->setValue(0);
+    m_modbusFormLayout->addWidget(m_writeAddressSpinBox, 4, 1);
+
+    m_writeQuantityLabel = new QLabel("Количество записи:");
+    m_modbusFormLayout->addWidget(m_writeQuantityLabel, 5, 0);
+    m_writeQuantitySpinBox = new QSpinBox();
+    m_writeQuantitySpinBox->setRange(1, 121); // предел функции 0x17 (0x79 регистров)
+    m_writeQuantitySpinBox->setValue(1);
+    m_modbusFormLayout->addWidget(m_writeQuantitySpinBox, 5, 1);
+
+    m_dataLabel = new QLabel("Данные (HEX):");
+    m_modbusFormLayout->addWidget(m_dataLabel, 6, 0);
     m_dataEdit = new QLineEdit();
     m_dataEdit->setPlaceholderText("Например: 01 02 03 04");
-    m_dataEdit->setVisible(false);
-    m_modbusFormLayout->addWidget(m_dataEdit, 4, 1, 1, 2);
-    
+    m_modbusFormLayout->addWidget(m_dataEdit, 6, 1, 1, 2);
+
     m_modbusLayout->addLayout(m_modbusFormLayout);
     
     m_sendModbusBtn = new QPushButton("Отправить Modbus запрос");
@@ -365,21 +382,44 @@ void MainWindow::setupConnections()
     connect(m_hostEdit, &QLineEdit::editingFinished, this, deriveIp);
     connect(m_prefixSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, [deriveIp](int){ deriveIp(); });
 
-    connect(m_functionCodeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), [this](int index) {
-        int funcCode = m_functionCodeCombo->currentData().toInt();
-        bool isWrite = (funcCode == 0x05 || funcCode == 0x06);
-        bool isMultipleWrite = (funcCode == 0x0F || funcCode == 0x10);
-        
-        m_quantitySpinBox->setVisible(!isWrite);
-        m_valueSpinBox->setVisible(isWrite);
-        m_dataEdit->setVisible(isMultipleWrite);
-        
-        if (isWrite) {
-            m_quantityLabel->setText("Значение:");
-        } else {
-            m_quantityLabel->setText("Количество:");
-        }
-    });
+    connect(m_functionCodeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int) { updateModbusFormFields(); });
+
+    updateModbusFormFields();
+}
+
+void MainWindow::updateModbusFormFields()
+{
+    int funcCode = m_functionCodeCombo->currentData().toInt();
+    bool isWrite = (funcCode == 0x05 || funcCode == 0x06);
+    bool isMultipleWrite = (funcCode == 0x0F || funcCode == 0x10);
+    bool isReadWrite = (funcCode == 0x17);
+
+    m_quantitySpinBox->setVisible(!isWrite);
+    m_valueSpinBox->setVisible(isWrite);
+
+    // Поля записи нужны только функции 0x17: у неё своя пара адрес/количество
+    // для записываемых регистров.
+    m_writeAddressLabel->setVisible(isReadWrite);
+    m_writeAddressSpinBox->setVisible(isReadWrite);
+    m_writeQuantityLabel->setVisible(isReadWrite);
+    m_writeQuantitySpinBox->setVisible(isReadWrite);
+
+    bool needsData = (isMultipleWrite || isReadWrite);
+    m_dataLabel->setVisible(needsData);
+    m_dataEdit->setVisible(needsData);
+
+    m_startAddressLabel->setText(isReadWrite ? "Адрес чтения:" : "Начальный адрес:");
+
+    if (isWrite) {
+        m_quantityLabel->setText("Значение:");
+    } else if (isReadWrite) {
+        m_quantityLabel->setText("Количество чтения:");
+    } else {
+        m_quantityLabel->setText("Количество:");
+    }
+
+    m_dataLabel->setText(isReadWrite ? "Данные записи (HEX):" : "Данные (HEX):");
 }
 
 void MainWindow::refreshPorts()
@@ -718,11 +758,13 @@ void MainWindow::sendModbusRequest()
     uint16_t startAddress = m_startAddressSpinBox->value();
     uint16_t quantity = m_quantitySpinBox->value();
     uint16_t value = m_valueSpinBox->value();
+    uint16_t writeAddress = m_writeAddressSpinBox->value();
+    uint16_t writeQuantity = m_writeQuantitySpinBox->value();
     QString dataString = m_dataEdit->text();
 
     // Для функций записи нескольких регистров/катушек разбираем поле данных.
     QByteArray writeData;
-    if (funcCode == 0x0F || funcCode == 0x10) {
+    if (funcCode == 0x0F || funcCode == 0x10 || funcCode == 0x17) {
         QStringList hexBytes = dataString.split(' ', Qt::SkipEmptyParts);
         for (const QString &hexByte : hexBytes) {
             bool ok;
@@ -733,6 +775,17 @@ void MainWindow::sendModbusRequest()
             }
             writeData.append(byte);
         }
+    }
+
+    // У функции 0x17 счётчик байт вычисляется из количества регистров записи,
+    // поэтому данных должно быть ровно 2 байта на регистр.
+    if (funcCode == 0x17 && writeData.length() != writeQuantity * 2) {
+        QMessageBox::warning(this, "Ошибка",
+                             QString("Для записи %1 регистр(ов) нужно %2 байт данных, введено %3")
+                                 .arg(writeQuantity)
+                                 .arg(writeQuantity * 2)
+                                 .arg(writeData.length()));
+        return;
     }
 
     const bool tcp = (m_transport == TransportTcp);
@@ -775,6 +828,17 @@ void MainWindow::sendModbusRequest()
                 packet = ModbusTCP::createWriteMultipleRequest(request, transactionId);
                 break;
             }
+            case 0x17: {
+                ModbusTCP::ReadWriteMultipleRequest request;
+                request.unitId = slaveAddress;
+                request.readStartAddress = startAddress;
+                request.readQuantity = quantity;
+                request.writeStartAddress = writeAddress;
+                request.writeQuantity = writeQuantity;
+                request.data = writeData;
+                packet = ModbusTCP::createReadWriteMultipleRequest(request, transactionId);
+                break;
+            }
             default:
                 QMessageBox::warning(this, "Ошибка", "Неподдерживаемый код функции");
                 return;
@@ -813,6 +877,17 @@ void MainWindow::sendModbusRequest()
                 request.quantity = quantity;
                 request.data = writeData;
                 packet = ModbusRTU::createWriteMultipleRequest(request);
+                break;
+            }
+            case 0x17: {
+                ModbusRTU::ReadWriteMultipleRequest request;
+                request.slaveAddress = slaveAddress;
+                request.readStartAddress = startAddress;
+                request.readQuantity = quantity;
+                request.writeStartAddress = writeAddress;
+                request.writeQuantity = writeQuantity;
+                request.data = writeData;
+                packet = ModbusRTU::createReadWriteMultipleRequest(request);
                 break;
             }
             default:

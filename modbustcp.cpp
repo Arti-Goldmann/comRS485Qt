@@ -61,6 +61,36 @@ QByteArray ModbusTCP::createWriteMultipleRequest(const WriteMultipleRequest &req
     return buildFrame(transactionId, request.unitId, pdu);
 }
 
+QByteArray ModbusTCP::createReadWriteMultipleRequest(const ReadWriteMultipleRequest &request, uint16_t transactionId)
+{
+    QByteArray pdu;
+    pdu.append(static_cast<char>(ReadWriteMultipleRegisters));
+    pdu.append(uint16ToBytes(request.readStartAddress));
+    pdu.append(uint16ToBytes(request.readQuantity));
+    pdu.append(uint16ToBytes(request.writeStartAddress));
+    pdu.append(uint16ToBytes(request.writeQuantity));
+
+    uint8_t byteCount = request.writeQuantity * 2;
+    pdu.append(static_cast<char>(byteCount));
+    pdu.append(request.data.left(byteCount));
+
+    return buildFrame(transactionId, request.unitId, pdu);
+}
+
+bool ModbusTCP::isReadWriteRequestFrame(const QByteArray &frame)
+{
+    // Запрос 0x17: MBAP(7) + функция + 4 поля по 2 байта + счётчик байт + данные.
+    // Ответ содержит только счётчик байт и данные, поэтому длина кадра вместе с
+    // согласованностью «счётчик байт == 2 * количество регистров записи»
+    // надёжно отличает запрос от ответа.
+    if (frame.length() < 17) {
+        return false;
+    }
+    uint8_t byteCount = static_cast<uint8_t>(frame[16]);
+    return byteCount == 2 * bytesToUint16(frame, 14) &&
+           frame.length() == 17 + byteCount;
+}
+
 bool ModbusTCP::validateResponse(const QByteArray &response)
 {
     // Минимум: MBAP(7) + код функции(1)
@@ -221,6 +251,29 @@ QString ModbusTCP::parseFrame(const QByteArray &frame)
                        .arg(QString(payload.toHex(' ').toUpper()));
             }
         }
+        case ReadWriteMultipleRegisters: {
+            if (isReadWriteRequestFrame(frame)) {
+                // Запрос: адрес и количество для чтения, затем то же для записи,
+                // счётчик байт и записываемые данные
+                uint16_t readAddress = bytesToUint16(frame, 8);
+                uint16_t readQuantity = bytesToUint16(frame, 10);
+                uint16_t writeAddress = bytesToUint16(frame, 12);
+                uint16_t writeQuantity = bytesToUint16(frame, 14);
+                uint8_t byteCount = static_cast<uint8_t>(frame[16]);
+                QByteArray payload = frame.mid(17, byteCount);
+                return QString("[Запрос] %1, Адрес чтения: %2, Количество чтения: %3, "
+                               "Адрес записи: %4, Количество записи: %5, Данные записи: %6")
+                       .arg(head).arg(readAddress).arg(readQuantity)
+                       .arg(writeAddress).arg(writeQuantity)
+                       .arg(QString(payload.toHex(' ').toUpper()));
+            } else {
+                // Ответ: счётчик байт + прочитанные данные
+                uint8_t byteCount = static_cast<uint8_t>(frame[8]);
+                QByteArray payload = frame.mid(9, byteCount);
+                return QString("[Ответ] %1, Байт данных: %2, Данные: %3")
+                       .arg(head).arg(byteCount).arg(QString(payload.toHex(' ').toUpper()));
+            }
+        }
         default:
             return head;
     }
@@ -253,6 +306,7 @@ QString ModbusTCP::functionCodeToString(FunctionCode code)
         case WriteSingleRegister: return "Запись одного регистра";
         case WriteMultipleCoils: return "Запись нескольких катушек";
         case WriteMultipleRegisters: return "Запись нескольких регистров";
+        case ReadWriteMultipleRegisters: return "Чтение/запись нескольких регистров";
         default: return "Неизвестная функция";
     }
 }

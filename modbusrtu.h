@@ -20,7 +20,8 @@ public:
         WriteSingleCoil = 0x05,
         WriteSingleRegister = 0x06,
         WriteMultipleCoils = 0x0F,
-        WriteMultipleRegisters = 0x10
+        WriteMultipleRegisters = 0x10,
+        ReadWriteMultipleRegisters = 0x17
     };
 
     struct ReadRequest {
@@ -45,12 +46,24 @@ public:
         QByteArray data;
     };
 
+    // Функция 0x17: в одной транзакции сначала выполняется запись регистров,
+    // затем чтение (у чтения и записи независимые адреса и количества).
+    struct ReadWriteMultipleRequest {
+        uint8_t slaveAddress;
+        uint16_t readStartAddress;
+        uint16_t readQuantity;
+        uint16_t writeStartAddress;
+        uint16_t writeQuantity;
+        QByteArray data;
+    };
+
     explicit ModbusRTU(QObject *parent = nullptr);
 
     static QByteArray createReadRequest(const ReadRequest &request);
     static QByteArray createWriteSingleRequest(const WriteSingleRequest &request);
     static QByteArray createWriteMultipleRequest(const WriteMultipleRequest &request);
-    
+    static QByteArray createReadWriteMultipleRequest(const ReadWriteMultipleRequest &request);
+
     static bool validateResponse(const QByteArray &response);
     static QString parseResponse(const QByteArray &response);
 
@@ -67,6 +80,10 @@ public:
     static QString exceptionCodeToString(uint8_t code);
 
 private:
+    // Отличает запрос функции 0x17 от ответа: у них разный состав PDU,
+    // а код функции одинаковый.
+    static bool isReadWriteRequestFrame(const QByteArray &frame);
+
     // Определяет длину корректного кадра Modbus RTU, начинающегося с offset,
     // либо 0, если корректный кадр (по CRC) там не найден.
     static int detectFrameLength(const QByteArray &buffer, int offset);
