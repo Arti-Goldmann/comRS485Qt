@@ -14,9 +14,10 @@ MainWindow::MainWindow(QWidget *parent)
     , m_centralWidget(nullptr)
     , m_serialHandler(nullptr)
     , m_tcpHandler(nullptr)
-    , m_statusTimer(new QTimer(this))
+    , m_cycleTimer(new QTimer(this))
     , m_isConnected(false)
     , m_transport(TransportSerial)
+    , m_cycleMode(CycleNone)
     , m_transactionId(0)
 {
     setupUI();
@@ -26,10 +27,18 @@ MainWindow::MainWindow(QWidget *parent)
     m_serialHandler = new SerialPortHandler(this);
     connect(m_serialHandler, &SerialPortHandler::dataReceived, this, &MainWindow::onDataReceived);
     connect(m_serialHandler, &SerialPortHandler::errorOccurred, this, &MainWindow::onPortError);
+    connect(m_serialHandler, &SerialPortHandler::connectionStatusChanged, this,
+            [this](bool connected) {
+                if (!connected) updateConnectionStatus(false);
+            });
 
     m_tcpHandler = new TcpClientHandler(this);
     connect(m_tcpHandler, &TcpClientHandler::dataReceived, this, &MainWindow::onDataReceived);
     connect(m_tcpHandler, &TcpClientHandler::errorOccurred, this, &MainWindow::onPortError);
+    connect(m_tcpHandler, &TcpClientHandler::connectionStatusChanged, this,
+            [this](bool connected) {
+                if (!connected) updateConnectionStatus(false);
+            });
 
     m_modbusRTU = new ModbusRTU(this);
     m_modbusTCP = new ModbusTCP(this);
@@ -90,6 +99,7 @@ void MainWindow::closeEvent(QCloseEvent *event)
         }
     }
 
+    stopCyclicSending();
     QMainWindow::closeEvent(event);
 }
 
@@ -243,6 +253,7 @@ void MainWindow::setupUI()
     m_sendLayout->addWidget(m_sendEdit);
     
     m_sendBtn = new QPushButton("Отправить");
+    m_sendBtn->setCheckable(true);
     m_sendBtn->setEnabled(false);
     m_sendLayout->addWidget(m_sendBtn);
     
@@ -327,6 +338,7 @@ void MainWindow::setupUI()
     m_modbusLayout->addLayout(m_modbusFormLayout);
     
     m_sendModbusBtn = new QPushButton("Отправить Modbus запрос");
+    m_sendModbusBtn->setCheckable(true);
     m_sendModbusBtn->setEnabled(false);
     m_modbusLayout->addWidget(m_sendModbusBtn);
     
@@ -335,8 +347,27 @@ void MainWindow::setupUI()
     modbusTabLayout->addStretch();
     
     m_dataTabWidget->addTab(m_modbusTab, "Modbus");
-    
+
     m_mainLayout->addWidget(m_dataTabWidget);
+
+    // Общие настройки циклической отправки. Поле периода показывается только
+    // когда режим включён, но сам цикл запускается кнопкой активной вкладки.
+    m_cycleLayout = new QHBoxLayout();
+    m_cycleCheck = new QCheckBox("Отправлять циклически");
+    m_cycleLayout->addWidget(m_cycleCheck);
+
+    m_cyclePeriodLabel = new QLabel("Период:");
+    m_cyclePeriodLabel->setVisible(false);
+    m_cycleLayout->addWidget(m_cyclePeriodLabel);
+
+    m_cyclePeriodSpin = new QSpinBox();
+    m_cyclePeriodSpin->setRange(10, 3600000);
+    m_cyclePeriodSpin->setValue(1000);
+    m_cyclePeriodSpin->setSuffix(" мс");
+    m_cyclePeriodSpin->setVisible(false);
+    m_cycleLayout->addWidget(m_cyclePeriodSpin);
+    m_cycleLayout->addStretch();
+    m_mainLayout->addLayout(m_cycleLayout);
     
     m_logGroup = new QGroupBox("Лог данных", this);
     m_logLayout = new QVBoxLayout(m_logGroup);
@@ -369,6 +400,21 @@ void MainWindow::setupConnections()
     connect(m_clearBtn, &QPushButton::clicked, this, &MainWindow::clearData);
     connect(m_sendEdit, &QLineEdit::returnPressed, this, &MainWindow::sendData);
     connect(m_sendModbusBtn, &QPushButton::clicked, this, &MainWindow::sendModbusRequest);
+
+    connect(m_cycleCheck, &QCheckBox::toggled, this, [this](bool enabled) {
+        m_cyclePeriodLabel->setVisible(enabled);
+        m_cyclePeriodSpin->setVisible(enabled);
+        if (!enabled) {
+            stopCyclicSending();
+        }
+    });
+    connect(m_cyclePeriodSpin, QOverload<int>::of(&QSpinBox::valueChanged),
+            this, [this](int periodMs) {
+                if (m_cycleTimer->isActive()) {
+                    m_cycleTimer->setInterval(periodMs);
+                }
+            });
+    connect(m_cycleTimer, &QTimer::timeout, this, &MainWindow::handleCycleTimeout);
 
     connect(m_transportGroup, QOverload<QAbstractButton*>::of(&QButtonGroup::buttonClicked),
             this, [this](QAbstractButton *) { onTransportChanged(); });
@@ -559,6 +605,8 @@ void MainWindow::connectToPort()
 
 void MainWindow::disconnectFromPort()
 {
+    stopCyclicSending();
+
     bool wasOpen = false;
     if (m_serialHandler && m_serialHandler->isOpen()) {
         m_serialHandler->close();
@@ -578,50 +626,61 @@ void MainWindow::disconnectFromPort()
 
 void MainWindow::sendData()
 {
+    handleSendAction(CycleRaw);
+}
+
+bool MainWindow::sendRawOnce(QString *errorMessage)
+{
     if (!isLinkOpen()) {
-        QMessageBox::warning(this, "Ошибка", "Нет активного подключения");
-        return;
+        if (errorMessage) *errorMessage = "Нет активного подключения";
+        return false;
     }
-    
-    QString data = m_sendEdit->text();
+
+    const QString data = m_sendEdit->text();
     if (data.isEmpty()) {
-        return;
+        if (errorMessage) *errorMessage = "Введите данные для отправки";
+        return false;
     }
-    
+
     QByteArray dataToSend;
-    
     if (m_hexModeCheck->isChecked()) {
-        QString hexData = data.remove(' ');
-        if (hexData.length() % 2 != 0) {
-            QMessageBox::warning(this, "Ошибка", "Некорректный HEX формат");
-            return;
+        QString hexData = data;
+        hexData.remove(' ');
+        if (hexData.isEmpty() || hexData.length() % 2 != 0) {
+            if (errorMessage) *errorMessage = "Некорректный HEX формат";
+            return false;
         }
-        
+
         for (int i = 0; i < hexData.length(); i += 2) {
-            bool ok;
-            unsigned char byte = hexData.mid(i, 2).toUInt(&ok, 16);
+            bool ok = false;
+            const unsigned char byte = hexData.mid(i, 2).toUInt(&ok, 16);
             if (!ok) {
-                QMessageBox::warning(this, "Ошибка", "Некорректный HEX формат");
-                return;
+                if (errorMessage) *errorMessage = "Некорректный HEX формат";
+                return false;
             }
             dataToSend.append(byte);
         }
     } else {
         dataToSend = data.toUtf8();
     }
-    
-    if (writeActive(dataToSend)) {
-        m_logText->append(QString("[%1] TX: %2")
-                          .arg(QDateTime::currentDateTime().toString("hh:mm:ss"))
-                          .arg(m_hexModeCheck->isChecked() ? 
-                               dataToSend.toHex(' ').toUpper() : 
-                               QString::fromUtf8(dataToSend)));
-        m_sendEdit->clear();
-        
-        if (m_autoScrollCheck->isChecked()) {
-            m_logText->moveCursor(QTextCursor::End);
+
+    if (!writeActive(dataToSend)) {
+        if (errorMessage) {
+            *errorMessage = QString("Не удалось отправить данные: %1").arg(activeErrorString());
         }
+        return false;
     }
+
+    m_logText->append(QString("[%1] TX: %2")
+                      .arg(QDateTime::currentDateTime().toString("hh:mm:ss"))
+                      .arg(m_hexModeCheck->isChecked()
+                               ? dataToSend.toHex(' ').toUpper()
+                               : QString::fromUtf8(dataToSend)));
+
+    if (m_autoScrollCheck->isChecked()) {
+        m_logText->moveCursor(QTextCursor::End);
+    }
+    return true;
 }
 
 void MainWindow::clearData()
@@ -724,6 +783,10 @@ void MainWindow::onPortError(const QString &error)
 
 void MainWindow::updateConnectionStatus(bool connected)
 {
+    if (!connected) {
+        stopCyclicSending();
+    }
+
     m_isConnected = connected;
 
     // В режиме TCP кнопка «Подключить» доступна всегда; в режиме Serial — только
@@ -748,9 +811,14 @@ void MainWindow::updateConnectionStatus(bool connected)
 
 void MainWindow::sendModbusRequest()
 {
+    handleSendAction(CycleModbus);
+}
+
+bool MainWindow::sendModbusOnce(QString *errorMessage)
+{
     if (!isLinkOpen()) {
-        QMessageBox::warning(this, "Ошибка", "Нет активного подключения");
-        return;
+        if (errorMessage) *errorMessage = "Нет активного подключения";
+        return false;
     }
 
     uint8_t slaveAddress = m_slaveAddressSpinBox->value();
@@ -760,32 +828,43 @@ void MainWindow::sendModbusRequest()
     uint16_t value = m_valueSpinBox->value();
     uint16_t writeAddress = m_writeAddressSpinBox->value();
     uint16_t writeQuantity = m_writeQuantitySpinBox->value();
-    QString dataString = m_dataEdit->text();
+    const QString dataString = m_dataEdit->text();
 
     // Для функций записи нескольких регистров/катушек разбираем поле данных.
     QByteArray writeData;
     if (funcCode == 0x0F || funcCode == 0x10 || funcCode == 0x17) {
-        QStringList hexBytes = dataString.split(' ', Qt::SkipEmptyParts);
-        for (const QString &hexByte : hexBytes) {
-            bool ok;
-            uint8_t byte = hexByte.toUInt(&ok, 16);
+        QString hexData = dataString;
+        hexData.remove(' ');
+        if (hexData.isEmpty() || hexData.length() % 2 != 0) {
+            if (errorMessage) *errorMessage = "Некорректный формат данных Modbus (ожидаются HEX-байты)";
+            return false;
+        }
+        for (int i = 0; i < hexData.length(); i += 2) {
+            bool ok = false;
+            const uint8_t byte = hexData.mid(i, 2).toUInt(&ok, 16);
             if (!ok) {
-                QMessageBox::warning(this, "Ошибка", "Некорректный формат данных");
-                return;
+                if (errorMessage) *errorMessage = "Некорректный формат данных Modbus (ожидаются HEX-байты)";
+                return false;
             }
             writeData.append(byte);
         }
     }
 
-    // У функции 0x17 счётчик байт вычисляется из количества регистров записи,
-    // поэтому данных должно быть ровно 2 байта на регистр.
-    if (funcCode == 0x17 && writeData.length() != writeQuantity * 2) {
-        QMessageBox::warning(this, "Ошибка",
-                             QString("Для записи %1 регистр(ов) нужно %2 байт данных, введено %3")
-                                 .arg(writeQuantity)
-                                 .arg(writeQuantity * 2)
-                                 .arg(writeData.length()));
-        return;
+    int expectedDataSize = -1;
+    if (funcCode == 0x0F) {
+        expectedDataSize = (quantity + 7) / 8;
+    } else if (funcCode == 0x10) {
+        expectedDataSize = quantity * 2;
+    } else if (funcCode == 0x17) {
+        expectedDataSize = writeQuantity * 2;
+    }
+    if (expectedDataSize >= 0 && writeData.length() != expectedDataSize) {
+        if (errorMessage) {
+            *errorMessage = QString("Для выбранной операции нужно %1 байт данных, введено %2")
+                                .arg(expectedDataSize)
+                                .arg(writeData.length());
+        }
+        return false;
     }
 
     const bool tcp = (m_transport == TransportTcp);
@@ -840,8 +919,8 @@ void MainWindow::sendModbusRequest()
                 break;
             }
             default:
-                QMessageBox::warning(this, "Ошибка", "Неподдерживаемый код функции");
-                return;
+                if (errorMessage) *errorMessage = "Неподдерживаемый код функции";
+                return false;
         }
     } else {
         // Modbus RTU
@@ -891,20 +970,116 @@ void MainWindow::sendModbusRequest()
                 break;
             }
             default:
-                QMessageBox::warning(this, "Ошибка", "Неподдерживаемый код функции");
-                return;
+                if (errorMessage) *errorMessage = "Неподдерживаемый код функции";
+                return false;
         }
     }
 
-    if (writeActive(packet)) {
-        m_logText->append(QString("[%1] TX (Modbus): %2")
-                          .arg(QDateTime::currentDateTime().toString("hh:mm:ss"))
-                          .arg(packet.toHex(' ').toUpper()));
-
-        if (m_autoScrollCheck->isChecked()) {
-            m_logText->moveCursor(QTextCursor::End);
+    if (!writeActive(packet)) {
+        if (errorMessage) {
+            *errorMessage = QString("Не удалось отправить Modbus-запрос: %1").arg(activeErrorString());
         }
+        return false;
     }
+
+    m_logText->append(QString("[%1] TX (Modbus): %2")
+                      .arg(QDateTime::currentDateTime().toString("hh:mm:ss"))
+                      .arg(packet.toHex(' ').toUpper()));
+
+    if (m_autoScrollCheck->isChecked()) {
+        m_logText->moveCursor(QTextCursor::End);
+    }
+    return true;
+}
+
+void MainWindow::handleSendAction(CycleMode mode)
+{
+    QPushButton *button = (mode == CycleRaw) ? m_sendBtn : m_sendModbusBtn;
+
+    // Повторное нажатие активной кнопки останавливает цикл.
+    if (m_cycleMode != CycleNone) {
+        if (m_cycleMode == mode) {
+            stopCyclicSending();
+        } else {
+            button->setChecked(false);
+        }
+        return;
+    }
+
+    QString errorMessage;
+    const bool sent = (mode == CycleRaw)
+                          ? sendRawOnce(&errorMessage)
+                          : sendModbusOnce(&errorMessage);
+
+    if (!sent) {
+        button->setChecked(false);
+        reportSendError(errorMessage);
+        return;
+    }
+
+    if (!m_cycleCheck->isChecked()) {
+        // В обычном режиме checkable-кнопка должна сразу вернуться в отпущенное состояние.
+        button->setChecked(false);
+        return;
+    }
+
+    m_cycleMode = mode;
+    button->setChecked(true);
+    m_cycleTimer->start(m_cyclePeriodSpin->value());
+
+    // Пока работает один источник, не даём запустить второй с другой вкладки.
+    const int rawIndex = m_dataTabWidget->indexOf(m_rawDataTab);
+    const int modbusIndex = m_dataTabWidget->indexOf(m_modbusTab);
+    if (rawIndex >= 0) m_dataTabWidget->setTabEnabled(rawIndex, mode == CycleRaw);
+    if (modbusIndex >= 0) m_dataTabWidget->setTabEnabled(modbusIndex, mode == CycleModbus);
+}
+
+void MainWindow::handleCycleTimeout()
+{
+    const CycleMode mode = m_cycleMode;
+    if (mode == CycleNone) {
+        return;
+    }
+
+    QString errorMessage;
+    const bool sent = (mode == CycleRaw)
+                          ? sendRawOnce(&errorMessage)
+                          : sendModbusOnce(&errorMessage);
+    if (!sent) {
+        // Сначала останавливаем таймер, чтобы модальное окно не повторялось.
+        stopCyclicSending();
+        reportSendError(errorMessage);
+    }
+}
+
+void MainWindow::stopCyclicSending()
+{
+    if (m_cycleTimer) {
+        m_cycleTimer->stop();
+    }
+    m_cycleMode = CycleNone;
+
+    if (m_sendBtn) m_sendBtn->setChecked(false);
+    if (m_sendModbusBtn) m_sendModbusBtn->setChecked(false);
+
+    if (m_dataTabWidget) {
+        const int rawIndex = m_dataTabWidget->indexOf(m_rawDataTab);
+        const int modbusIndex = m_dataTabWidget->indexOf(m_modbusTab);
+        if (rawIndex >= 0) m_dataTabWidget->setTabEnabled(rawIndex, true);
+        if (modbusIndex >= 0) m_dataTabWidget->setTabEnabled(modbusIndex, true);
+    }
+}
+
+void MainWindow::reportSendError(const QString &errorMessage)
+{
+    const QString text = errorMessage.isEmpty() ? "Не удалось отправить данные" : errorMessage;
+    m_logText->append(QString("[%1] ОШИБКА отправки: %2")
+                      .arg(QDateTime::currentDateTime().toString("hh:mm:ss"))
+                      .arg(text));
+    if (m_autoScrollCheck->isChecked()) {
+        m_logText->moveCursor(QTextCursor::End);
+    }
+    QMessageBox::warning(this, "Ошибка", text);
 }
 
 void MainWindow::onTransportChanged()
