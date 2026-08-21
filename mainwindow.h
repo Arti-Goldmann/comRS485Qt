@@ -52,6 +52,7 @@ private slots:
 
 private:
     enum Transport { TransportSerial, TransportTcp };
+    enum CycleMode { CycleNone, CycleRaw, CycleModbus };
 
     void setupUI();
     void setupConnections();
@@ -59,6 +60,15 @@ private:
     // Показывает поля формы Modbus, нужные выбранному коду функции.
     void updateModbusFormFields();
     void appendRawData(const QByteArray &data, const QString &timestamp);
+
+    // Отправляет один пакет из соответствующей вкладки. При ошибке возвращает
+    // false и записывает понятное пользователю описание в errorMessage.
+    bool sendRawOnce(QString *errorMessage);
+    bool sendModbusOnce(QString *errorMessage);
+    void handleSendAction(CycleMode mode);
+    void handleCycleTimeout();
+    void stopCyclicSending();
+    void reportSendError(const QString &errorMessage);
 
     // Текущий выбранный транспорт (по состоянию радиокнопок).
     Transport selectedTransport() const;
@@ -113,6 +123,12 @@ private:
     QLineEdit *m_sendEdit;
     QPushButton *m_sendBtn;
     QCheckBox *m_hexModeCheck;
+
+    // Общие настройки циклической отправки для обеих вкладок.
+    QHBoxLayout *m_cycleLayout;
+    QCheckBox *m_cycleCheck;
+    QLabel *m_cyclePeriodLabel;
+    QSpinBox *m_cyclePeriodSpin;
     
     QWidget *m_modbusTab;
     QGroupBox *m_modbusGroup;
@@ -146,10 +162,11 @@ private:
     ModbusRTU *m_modbusRTU;
     ModbusTCP *m_modbusTCP;
     NetworkConfigurator *m_netConfigurator;
-    QTimer *m_statusTimer;
+    QTimer *m_cycleTimer;
 
     bool m_isConnected;
     Transport m_transport;        // активный транспорт открытого соединения
+    CycleMode m_cycleMode;         // вкладка, пакет которой сейчас отправляется циклически
     uint16_t m_transactionId;     // счётчик Transaction ID для Modbus TCP
 };
 
