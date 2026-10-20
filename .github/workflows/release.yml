@@ -1,0 +1,72 @@
+# Сборка comRS485Qt под Windows и публикация zip папки Release в GitHub Releases.
+#
+# Запуск: отправить тег вида v1.2 (git tag v1.2 && git push origin v1.2) —
+# будет создан релиз v1.2 с архивом comRS485Qt-v1.2.zip.
+# Также можно запустить вручную во вкладке Actions (указав имя тега).
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Имя тега релиза (например, v0.2)'
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  QT_VERSION: '6.9.1'
+  MINGW_DIR: 'mingw1310_64'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Установка Qt и MinGW
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: windows
+          target: desktop
+          arch: win64_mingw
+          modules: 'qtserialport'
+          tools: 'tools_mingw1310'
+          cache: true
+
+      - name: Добавление MinGW в PATH
+        shell: pwsh
+        run: echo "${{ env.IQTA_TOOLS }}\${{ env.MINGW_DIR }}\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      # Цель deploy_release (из CMakeLists.txt) вызывает deploy.bat,
+      # который кладёт exe и зависимости (windeployqt) в папку Release.
+      - name: Сборка и развёртывание в Release
+        shell: pwsh
+        run: |
+          cmake -S . -B build-ci -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-ci --target deploy_release --parallel
+
+      - name: Упаковка Release в zip
+        id: pack
+        shell: pwsh
+        run: |
+          $tag = if ("${{ github.event_name }}" -eq "workflow_dispatch") { "${{ inputs.tag }}" } else { "${{ github.ref_name }}" }
+          if (-not (Test-Path Release\comRS485Qt.exe)) { throw "Release\comRS485Qt.exe не найден" }
+          $zip = "comRS485Qt-$tag.zip"
+          Compress-Archive -Path Release -DestinationPath $zip
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "zip=$zip" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Публикация релиза
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.pack.outputs.tag }}
+          name: ${{ steps.pack.outputs.tag }}
+          files: ${{ steps.pack.outputs.zip }}
+          generate_release_notes: true
